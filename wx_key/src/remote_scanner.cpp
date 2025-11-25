@@ -172,9 +172,13 @@ std::vector<uintptr_t> RemoteScanner::FindAllPatterns(const RemoteModuleInfo& mo
         if (status != STATUS_SUCCESS || bytesRead == 0) {
             continue;
         }
-        
+
+        if (bytesRead < patternLength) {
+            continue;
+        }
+
         // 在本地缓冲区中搜索特征码
-        for (SIZE_T i = 0; i < bytesRead - patternLength; i++) {
+        for (SIZE_T i = 0; i + patternLength <= bytesRead; ++i) {
             if (MatchPattern(&scanBuffer[i], pattern, mask, patternLength)) {
                 results.push_back(baseAddress + offset + i);
             }

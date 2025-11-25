@@ -8,9 +8,9 @@
 
 简单来说，`wx_key.dll` 充当了**宿主程序**与**微信进程**之间的桥梁。
 
-1.  **注入与扫描**：当你的程序加载此 DLL 并调用初始化后，它会通过 `RemoteScanner` 扫描微信进程内存，利用特征码定位密钥获取函数的入口（支持 4.x 多个版本）。
-2.  **拦截与共享**：定位成功后，DLL 会写入一段 Shellcode 进行 Hook。当微信尝试读取数据库时，Shellcode 会拦截 32 字节的密钥，将其拷贝到**共享内存环形队列**中。
-3.  **轮询机制**：由于 Hook 运行在微信进程内，为了稳定传输，我们采用了“非阻塞轮询”方案。你的程序只需定时检查共享内存，即可拿到密钥。
+1.  **注入与扫描**：当你的程序加载此 DLL 并调用初始化后，它会通过 `RemoteScanner` 扫描微信进程内存，利用特征码定位密钥获取函数的入口（支持 4.x 多个版本）。PID 由外部传入，DLL 不再枚举进程。
+2.  **拦截与共享**：定位成功后，DLL 会写入一段 Shellcode 进行 Hook。当微信尝试读取数据库时，Shellcode 会拦截 32 字节的密钥，将其拷贝到**共享内存缓冲**中，并递增一个 `sequenceNumber`。
+3.  **轮询机制**：DLL 内部使用事件唤醒 + 轮询监听线程。你的程序只需定时检查共享内存是否有新的 `sequenceNumber`，即可拿到密钥。
 
 > **⚠️ 环境硬性要求**：
 > *   **架构**：仅支持 x64 系统与 64 位微信客户端（Shellcode 为 x64 汇编）。
@@ -24,7 +24,7 @@
 
 | 接口函数 | 参数说明 | 详细描述 |
 | :--- | :--- | :--- |
-| **`InitializeHook`** | `DWORD targetPid` (微信进程ID) | **启动入口**。执行远程扫描、分配共享内存并注入 Shellcode。成功返回 `true`，失败请调 `GetLastErrorMsg`。 |
+| **`InitializeHook`** | `DWORD targetPid` (微信进程ID) | **启动入口**。执行远程扫描、分配共享内存并注入 Shellcode。成功返回 `true`，失败请调 `GetLastErrorMsg`。PID 需要调用方自行获取。 |
 | **`PollKeyData`** | `char* keyBuf`<br>`int size` (建议 >= 65) | **获取密钥**。非阻塞检查。如果捕获到密钥，会将其格式化为 64 位 HEX 字符串写入缓冲区并返回 `true`。一次读取后自动清空。 |
 | **`GetStatusMessage`** | `char* msgBuf`<br>`int size`<br>`int* outLevel` | **获取日志**。读取 DLL 内部运行日志（如“扫描成功”、“特征码未找到”等）。`outLevel` 对应：`0=Info, 1=Success, 2=Error`。 |
 | **`CleanupHook`** | 无 | **清理资源**。卸载远程 Hook、释放共享内存并关闭句柄。**程序退出前务必调用**。 |
@@ -37,7 +37,7 @@
 无论使用哪种语言，集成步骤都应该要遵循以下流程：
 
 ### 第一步：定位进程
-自行查找 `Weixin.exe` 的 PID（进程 ID）。
+自行查找 `Weixin.exe` 的 PID（进程 ID），DLL 不再替你枚举进程。
 
 ### 第二步：加载 DLL
 将 `wx_key.dll` 加载到当前进程空间。
@@ -51,6 +51,7 @@
 ### 第四步：轮询 (Polling)
 启动一个后台线程或定时器（建议间隔 100ms），循环调用 `PollKeyData` 和 `GetStatusMessage`。
 *   **注意**：不要在 UI 线程直接做死循环，也不要设置过长的等待时间。
+*   `PollKeyData` 每次返回后会清空共享缓冲；若需要去重，可对 `sequenceNumber` 进行本地缓存比对。
 
 ### 第五步：清理 (Cleanup)
 在程序关闭或不再需要功能时，**必须**调用 `CleanupHook()`。
@@ -144,5 +145,20 @@ public class WeChatKeyDumper
 3.  **版本兼容性**：
     如果遇到微信更新导致无法获取密钥，通常是特征码偏移变了。此时无需修改上层代码，只需更新 DLL 源码中的 `RemoteScanner` 特征码库并重新编译 DLL 即可。
 
-4.  **多线程安全**：
+4.  **日志前缀**：
+    DLL 返回的 `GetStatusMessage` 字符串不再附加 `[INFO]/[SUCCESS]` 等标签，UI 层可依据 `outLevel` 自行添加前缀。
+
+5.  **共享内存结构（供参考）**：
+
+    ```c
+    typedef struct {
+        DWORD dataSize;        // 固定 32
+        BYTE  keyBuffer[32];   // 32 字节密钥
+        DWORD sequenceNumber;  // 每次写入 +1，用于去重
+    } SharedKeyData;
+    ```
+
+    Shellcode 会在 `dataSize == 32` 时写入并递增 `sequenceNumber`。上层可以持有上次读到的 `sequenceNumber` 来避免重复处理同一条数据。
+
+6.  **多线程安全**：
     虽然导出函数内部是线程安全的，但为了逻辑清晰，建议仅在一个专用的 Monitor 线程中进行轮询操作。

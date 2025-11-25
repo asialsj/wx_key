@@ -10,7 +10,7 @@ IPCManager::IPCManager()
     , pSharedMemory(nullptr)
     , hTargetProcess(nullptr)
     , pRemoteBuffer(nullptr)
-    , lastTimestamp(0)
+    , lastSequenceNumber(0)
     , hListeningThread(nullptr)
     , shouldStopListening(false)
 {
@@ -125,7 +125,7 @@ bool IPCManager::Initialize(const std::string& uniqueId) {
 void IPCManager::SetRemoteBuffer(HANDLE hProcess, PVOID remoteBufferAddr) {
     hTargetProcess = hProcess;
     pRemoteBuffer = remoteBufferAddr;
-    lastTimestamp = 0;
+    lastSequenceNumber = 0;
 }
 
 void IPCManager::Cleanup() {
@@ -156,7 +156,10 @@ bool IPCManager::StartListening() {
         return true; // 已经在监听
     }
     
-    shouldStopListening = false;
+    shouldStopListening.store(false);
+    if (hEvent) {
+        ResetEvent(hEvent);
+    }
     hListeningThread = CreateThread(
         nullptr,
         0,
@@ -174,7 +177,7 @@ void IPCManager::StopListening() {
         return;
     }
     
-    shouldStopListening = true;
+    shouldStopListening.store(true);
     SetEvent(hEvent); // 唤醒等待线程
     
     // 等待线程退出
@@ -199,9 +202,16 @@ DWORD WINAPI IPCManager::ListeningThreadProc(LPVOID lpParam) {
 
 void IPCManager::ListeningLoop() {
     // 轮询模式：周期性读取远程进程中的缓冲区
-    while (!shouldStopListening) {
+    while (!shouldStopListening.load()) {
+        DWORD waitResult = WaitForSingleObject(hEvent, 100);
+        if (waitResult == WAIT_OBJECT_0) {
+            if (shouldStopListening.load()) {
+                break;
+            }
+            ResetEvent(hEvent);
+        }
+
         if (!hTargetProcess || !pRemoteBuffer) {
-            Sleep(100);
             continue;
         }
         
@@ -219,14 +229,14 @@ void IPCManager::ListeningLoop() {
         );
         
         if (readResult && bytesRead == sizeof(SharedKeyData)) {
-            // 检查是否有新数据（通过timestamp判断）
+            // 检查是否有新数据（通过序列号判断）
             if (keyData.dataSize > 0 && 
                 keyData.dataSize <= 32 && 
-                keyData.timestamp != lastTimestamp &&
-                keyData.timestamp != 0) {
+                keyData.sequenceNumber != lastSequenceNumber &&
+                keyData.sequenceNumber != 0) {
                 
-                // 更新时间戳
-                lastTimestamp = keyData.timestamp;
+                // 更新序列号
+                lastSequenceNumber = keyData.sequenceNumber;
                 
                 // 调用回调函数
                 if (dataCallback) {
@@ -246,9 +256,6 @@ void IPCManager::ListeningLoop() {
                 );
             }
         }
-        
-        // 短暂休眠，避免过度占用CPU（100ms轮询间隔）
-        Sleep(100);
     }
 }
 

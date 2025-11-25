@@ -6,7 +6,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:path/path.dart' as path;
 import 'services/dll_injector.dart';
-import 'services/remote_hook_controller.dart'; // 新增：远程Hook控制器
+import 'services/remote_hook_controller.dart';
 import 'services/key_storage.dart';
 import 'services/log_reader.dart';
 import 'services/app_logger.dart';
